@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Environment — never commit real keys
+backend/.env
+
+# Qdrant local storage — large binary, rebuild with ingestion.py
+backend/data/qdrant_storage/
+
+# Node
+node_modules/
+.next/
+out/
+.npm/
+
+# OS
+.DS_Store
+*.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*

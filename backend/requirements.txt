@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+qdrant-client
+docling
+fastembed
+groq
+python-dotenv
+pydantic
+pydantic-settings
+pandas
+sqlite3-to-mysql ; sys_platform == 'never' # Just to list sqlite3 which is built-in
