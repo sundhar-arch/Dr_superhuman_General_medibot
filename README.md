@@ -143,16 +143,16 @@ Open `http://localhost:3000` in your browser.
 |--------|-----------------------|-------------|
 | POST   | `/login`              | Returns role-tagged token |
 | POST   | `/chat`               | Main RAG endpoint — hybrid or SQL, with RBAC |
-| GET    | `/collections/{role}` | Lists accessible collections for a role |
+| GET    | `/collections`        | Lists accessible collections for the authenticated user |
 | GET    | `/health`             | Health check |
 
 ### `/chat` request body
 
+Role is extracted server-side from the `Authorization: Bearer <token>` header returned at login.
+
 ```json
 {
-  "question": "What is the ICU handover protocol?",
-  "role": "nurse",
-  "username": "nurse.priya"
+  "question": "What is the ICU handover protocol?"
 }
 ```
 
@@ -247,6 +247,7 @@ and administrators.
 | `QDRANT_HOST`      | `localhost`               | Qdrant server host (if not in-memory) |
 | `QDRANT_PORT`      | `6333`                    | Qdrant server port (if not in-memory) |
 | `COLLECTION_NAME`  | `medibot_documents`       | Qdrant collection name |
+| `ALLOWED_ORIGIN`   | `http://localhost:3000`   | Allowed CORS origin (set to your frontend URL in production) |
 
 ---
 

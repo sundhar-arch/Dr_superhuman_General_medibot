@@ -1,3 +1,4 @@
+import contextlib
 import os
 import re
 import sqlite3
@@ -9,10 +10,20 @@ load_dotenv()
 
 DB_PATH = Path(__file__).parent / "mediassist_data" / "db" / "mediassist.db"
 
-def get_db_connection():
-    return sqlite3.connect(str(DB_PATH))
+# C2 fix: only SELECT statements are permitted
+_ALLOWED_SQL_PREFIX = re.compile(r"^\s*SELECT\s", re.IGNORECASE)
 
-# Schema details to supply to the LLM
+
+# C2 fix: read-only connection — SQLite rejects any write attempt at the driver level
+def get_db_connection():
+    return sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+
+
+def validate_select_only(sql: str):
+    if not _ALLOWED_SQL_PREFIX.match(sql):
+        raise ValueError(f"Rejected non-SELECT statement: {sql[:60]!r}")
+
+
 DB_SCHEMA = """
 Table 1: claims
 Columns:
@@ -45,14 +56,13 @@ Columns:
 - resolution_note (TEXT)
 """
 
+
 def clean_sql_query(raw_sql: str) -> str:
-    # Remove markdown code block wrapping if present
     sql = re.sub(r"```sql\s*", "", raw_sql, flags=re.IGNORECASE)
     sql = re.sub(r"```\s*", "", sql)
-    # Strip any leading/trailing whitespace
     sql = sql.strip()
-    # Remove terminating semicolon for safety (optional, but keep it if standard SQLite)
     return sql
+
 
 def sql_rag_chain(question: str) -> dict:
     api_key = os.getenv("GROQ_API_KEY")
@@ -67,7 +77,6 @@ def sql_rag_chain(question: str) -> dict:
     model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     sql_query = ""
 
-    # Step 1: Generate SQL query
     system_prompt = f"""You are a SQLite database expert. Write a raw SQLite SQL query to answer the user's question.
 Do NOT include any explanations, conversation, or markdown text. Output ONLY the raw SQL query.
 If the question is about claims, use the `claims` table. If it is about equipment maintenance, use the `maintenance_tickets` table.
@@ -89,23 +98,22 @@ Example Output: SELECT SUM(claimed_amount) FROM claims WHERE status = 'Approved'
             temperature=0.0,
             max_tokens=150
         )
-        
+
         raw_sql = completion.choices[0].message.content
         sql_query = clean_sql_query(raw_sql)
-        
-        # Step 2: Execute SQL query
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        print(f"Executing SQL: {sql_query}")
-        cursor.execute(sql_query)
-        rows = cursor.fetchall()
-        
-        # Format results
-        columns = [description[0] for description in cursor.description]
-        results_list = [dict(zip(columns, row)) for row in rows]
-        conn.close()
-        
-        # Step 3: Summarize results in natural language
+
+        # C2 fix: reject any non-SELECT before touching the database
+        validate_select_only(sql_query)
+
+        # C3 fix: contextlib.closing guarantees conn.close() even on exception
+        with contextlib.closing(get_db_connection()) as conn:
+            cursor = conn.cursor()
+            print(f"Executing SQL: {sql_query}")
+            cursor.execute(sql_query)
+            rows = cursor.fetchall()
+            columns = [description[0] for description in cursor.description]
+            results_list = [dict(zip(columns, row)) for row in rows]
+
         summary_system_prompt = f"""You are a helpful healthcare systems data analyst.
 Summarize the database query results to answer the user's question. Be precise and ground your answer strictly in the provided query results.
 Do not hallucinate any details that are not in the query results.
@@ -123,18 +131,19 @@ Query Results: {results_list}
             temperature=0.3,
             max_tokens=250
         )
-        
+
         answer = summary_completion.choices[0].message.content
         return {
             "answer": answer.strip(),
             "sql_query": sql_query,
             "sql_result": str(results_list)
         }
-        
+
     except Exception as e:
+        # C8 fix: full error logged server-side only; generic message returned to client
         print(f"Error in SQL RAG chain: {e}")
         return {
-            "answer": f"An error occurred while executing the SQL RAG chain: {str(e)}",
+            "answer": "Unable to process your analytical query. Please try rephrasing or contact support.",
             "sql_query": sql_query,
             "sql_result": "Error"
         }

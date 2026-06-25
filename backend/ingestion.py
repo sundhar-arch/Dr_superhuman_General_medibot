@@ -1,5 +1,6 @@
 import os
 import glob
+import uuid
 from pathlib import Path
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
@@ -43,27 +44,26 @@ def get_qdrant_client():
             db_path.parent.mkdir(parents=True, exist_ok=True)
             return QdrantClient(path=str(db_path))
 
-def create_collection_if_not_exists(client: QdrantClient):
-    collections = [col.name for col in client.get_collections().collections]
-    if COLLECTION_NAME not in collections:
-        print(f"Creating Qdrant collection: {COLLECTION_NAME}")
-        client.create_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config=VectorParams(
-                size=384,  # BAAI/bge-small-en-v1.5 size
-                distance=Distance.COSINE
-            ),
-            sparse_vectors_config={
-                "text-sparse": SparseVectorParams(
-                    index=SparseIndexParams(
-                        on_disk=False
-                    )
-                )
-            }
-        )
-        print("Collection created successfully.")
-    else:
-        print(f"Collection {COLLECTION_NAME} already exists.")
+# C7 fix: always drop and recreate so stale chunks from removed documents never survive
+def recreate_collection(client: QdrantClient):
+    existing = [col.name for col in client.get_collections().collections]
+    if COLLECTION_NAME in existing:
+        print(f"Dropping existing collection: {COLLECTION_NAME}")
+        client.delete_collection(collection_name=COLLECTION_NAME)
+    print(f"Creating Qdrant collection: {COLLECTION_NAME}")
+    client.create_collection(
+        collection_name=COLLECTION_NAME,
+        vectors_config=VectorParams(
+            size=384,  # BAAI/bge-small-en-v1.5 output dimension
+            distance=Distance.COSINE
+        ),
+        sparse_vectors_config={
+            "text-sparse": SparseVectorParams(
+                index=SparseIndexParams(on_disk=False)
+            )
+        }
+    )
+    print("Collection created successfully.")
 
 def parse_and_chunk_documents():
     data_dir = Path(__file__).parent / "mediassist_data"
@@ -122,7 +122,7 @@ def parse_and_chunk_documents():
 
 def run_ingestion():
     client = get_qdrant_client()
-    create_collection_if_not_exists(client)
+    recreate_collection(client)
     
     print("Starting document parsing...")
     chunks = parse_and_chunk_documents()
@@ -156,9 +156,14 @@ def run_ingestion():
             "values": sparse_vec.values.tolist()
         }
         
+        # C7 fix: content-derived UUID so the same doc+chunk always maps to the same ID
+        point_id = str(uuid.uuid5(
+            uuid.NAMESPACE_DNS,
+            f"{chunk['metadata']['source_document']}:{i}"
+        ))
         points.append(
             PointStruct(
-                id=i,
+                id=point_id,
                 vector={
                     "": dense_vec,
                     "text-sparse": sparse_val

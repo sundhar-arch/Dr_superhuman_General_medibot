@@ -77,7 +77,10 @@ export default function ChatPage() {
     setRole(storedRole)
     setUsername(storedUser)
 
-    fetch(`${API_BASE}/collections/${storedRole}`)
+    // C9 fix: authenticated request; role derived from token server-side
+    fetch(`${API_BASE}/collections`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
       .then(r => r.json())
       .then(d => setCollections(d.collections ?? []))
       .catch(() => {})
@@ -103,10 +106,14 @@ export default function ChatPage() {
     setLoading(true)
 
     try {
+      // C1 fix: role verified from Bearer token server-side, not from request body
       const res  = await fetch(`${API_BASE}/chat`, {
         method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ question, role, username }),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token') ?? ''}`,
+        },
+        body:    JSON.stringify({ question }),
       })
       const data = await res.json()
       const botMsg: Message = {

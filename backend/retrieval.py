@@ -56,6 +56,17 @@ def get_qdrant_client():
                 _qdrant_client = QdrantClient(path=str(db_path))
     return _qdrant_client
 
+
+# C10 fix: called at startup so all four singletons are initialized before the first request
+def warmup_models():
+    print("[Retrieval] Warming up models and Qdrant client...")
+    get_dense_model()
+    get_sparse_model()
+    get_reranker()
+    get_qdrant_client()
+    print("[Retrieval] Warmup complete.")
+
+
 def hybrid_search(query: str, role: str, limit: int = 10) -> list:
     client = get_qdrant_client()
     
@@ -218,6 +229,6 @@ Retrieved Context:
     except Exception as e:
         print(f"Error in Hybrid RAG chain: {e}")
         return {
-            "answer": f"An error occurred while generating the answer: {str(e)}",
+            "answer": "Unable to generate a response at this time. Please try again.",
             "sources": []
         }

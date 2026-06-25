@@ -1,86 +1,104 @@
 import os
-from fastapi import FastAPI, HTTPException, Body
+from typing import Optional
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from groq import Groq
 
-# Import database and retrieval chains
 from database import sql_rag_chain
-from retrieval import hybrid_rag_chain, hybrid_search
+from retrieval import hybrid_rag_chain, warmup_models
 
 load_dotenv()
 
 app = FastAPI(title="Dr. Superhuman General MediBot API")
 
-# Configure CORS
+# C4 fix: explicit origin instead of wildcard; credentials=False for bearer-token flow
+ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "http://localhost:3000")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[ALLOWED_ORIGIN],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Mock user credentials database
 MOCK_USERS = {
-    "dr.mehta": {"password": "password", "role": "doctor"},
-    "nurse.priya": {"password": "password", "role": "nurse"},
+    "dr.mehta":     {"password": "password", "role": "doctor"},
+    "nurse.priya":  {"password": "password", "role": "nurse"},
     "billing.ravi": {"password": "password", "role": "billing_executive"},
-    "tech.anand": {"password": "password", "role": "technician"},
-    "admin.sys": {"password": "password", "role": "admin"}
+    "tech.anand":   {"password": "password", "role": "technician"},
+    "admin.sys":    {"password": "password", "role": "admin"}
 }
 
 ROLE_COLLECTIONS = {
-    "doctor": ["clinical", "nursing", "general"],
-    "nurse": ["nursing", "general"],
+    "doctor":            ["clinical", "nursing", "general"],
+    "nurse":             ["nursing", "general"],
     "billing_executive": ["billing", "general"],
-    "technician": ["equipment", "general"],
-    "admin": ["clinical", "nursing", "billing", "equipment", "general"]
+    "technician":        ["equipment", "general"],
+    "admin":             ["clinical", "nursing", "billing", "equipment", "general"]
 }
+
+
+# C1 fix: token verified server-side; role never taken from request body
+def verify_token(authorization: Optional[str] = Header(default=None)) -> dict:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = authorization[len("Bearer "):]
+    # Token format: token-{username}-{role}  (usernames use dots, not hyphens — safe split)
+    parts = token.split("-", 2)
+    if len(parts) != 3 or parts[0] != "token":
+        raise HTTPException(status_code=401, detail="Invalid token")
+    username, role = parts[1], parts[2]
+    user = MOCK_USERS.get(username)
+    if not user or user["role"] != role:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return {"username": username, "role": role}
+
 
 class LoginRequest(BaseModel):
     username: str
     password: str
 
+
 class ChatRequest(BaseModel):
     question: str
-    role: str
-    username: str = "user"
+
+
+# C10 fix: models loaded eagerly at startup — no race on first concurrent request
+@app.on_event("startup")
+def startup_event():
+    warmup_models()
+
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
 
 @app.post("/login")
 def login(req: LoginRequest):
     user = MOCK_USERS.get(req.username.lower())
     if not user or user["password"] != req.password:
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    
-    # Mock token is simply the username tagged with role
     token = f"token-{req.username}-{user['role']}"
-    return {
-        "token": token,
-        "role": user["role"],
-        "username": req.username
-    }
+    return {"token": token, "role": user["role"], "username": req.username}
 
-@app.get("/collections/{role}")
-def get_collections(role: str):
-    collections = ROLE_COLLECTIONS.get(role.lower())
-    if not collections:
-        raise HTTPException(status_code=404, detail="Role not found")
-    return {"role": role, "collections": collections}
+
+# C9 fix: requires valid token; role derived from token, not URL param
+@app.get("/collections")
+def get_collections(current_user: dict = Depends(verify_token)):
+    role = current_user["role"]
+    return {"role": role, "collections": ROLE_COLLECTIONS.get(role, [])}
+
 
 def classify_question(question: str) -> str:
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         return "document"
-        
     client = Groq(api_key=api_key)
     model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-    
     prompt = f"""Categorize the user's question into one of two categories:
 1. "analytical": The question requires counts, sums, database stats, tickets, billing claims, or other structured database calculations.
 2. "document": The question asks about treatment guidelines, procedures, handbooks, calibration steps, or textual knowledge.
@@ -92,31 +110,27 @@ Question: {question}
     try:
         completion = client.chat.completions.create(
             model=model,
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
+            messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
             max_tokens=10
         )
         category = completion.choices[0].message.content.strip().lower()
-        if "analytical" in category:
-            return "analytical"
-        return "document"
+        return "analytical" if "analytical" in category else "document"
     except Exception as e:
         print(f"Error classifying question: {e}")
         return "document"
 
+
+# C1 fix: role from verified token; C5+C6 fix: pre-check removed, Qdrant RBAC filter is authoritative
 @app.post("/chat")
-def chat(req: ChatRequest):
-    role = req.role.lower()
+def chat(req: ChatRequest, current_user: dict = Depends(verify_token)):
+    role = current_user["role"]
     question = req.question
-    
-    # 1. Determine if analytical query
+
     query_type = classify_question(question)
-    print(f"Question classified as: {query_type}")
-    
+    print(f"Question classified as: {query_type} for role: {role}")
+
     if query_type == "analytical":
-        # Check permissions for SQL database RAG
         if role not in ["billing_executive", "admin"]:
             return {
                 "answer": f"Access Denied: As a {role}, you do not have permission to view analytical billing claims or maintenance databases. SQL query generation is restricted to billing executives and administrators.",
@@ -124,7 +138,6 @@ def chat(req: ChatRequest):
                 "retrieval_type": "sql_rag_blocked",
                 "role": role
             }
-            
         result = sql_rag_chain(question)
         return {
             "answer": result["answer"],
@@ -132,37 +145,23 @@ def chat(req: ChatRequest):
             "retrieval_type": "sql_rag",
             "role": role
         }
-        
-    else:
-        # Document search RAG
-        # First, run search WITHOUT filter to see if the content is restricted
-        unfiltered_results = hybrid_search(question, "admin", limit=3)
-        
-        # Check if the top unfiltered result belongs to a collection the user cannot access
-        allowed_collections = ROLE_COLLECTIONS.get(role, ["general"])
-        
-        if unfiltered_results:
-            top_payload = unfiltered_results[0].payload
-            top_collection = top_payload.get("collection", "general")
-            
-            if top_collection not in allowed_collections:
-                # User is attempting to access restricted collection documents
-                readable_list = ", ".join(allowed_collections)
-                return {
-                    "answer": f"Access Denied: As a {role}, you don't have access to {top_collection} documents. I can only answer questions from the following permitted collections: {readable_list}.",
-                    "sources": [],
-                    "retrieval_type": "hybrid_rag_blocked",
-                    "role": role
-                }
-                
-        # Run normal hybrid RAG with RBAC filter
-        result = hybrid_rag_chain(question, role)
+
+    result = hybrid_rag_chain(question, role)
+    if not result["sources"]:
+        allowed = ", ".join(ROLE_COLLECTIONS.get(role, ["general"]))
         return {
-            "answer": result["answer"],
-            "sources": result["sources"],
-            "retrieval_type": "hybrid_rag",
+            "answer": f"Access Denied: No documents found in your permitted collections ({allowed}). The information you requested may be restricted to another role.",
+            "sources": [],
+            "retrieval_type": "hybrid_rag_blocked",
             "role": role
         }
+    return {
+        "answer": result["answer"],
+        "sources": result["sources"],
+        "retrieval_type": "hybrid_rag",
+        "role": role
+    }
+
 
 if __name__ == "__main__":
     import uvicorn
