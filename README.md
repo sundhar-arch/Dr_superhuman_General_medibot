@@ -1,6 +1,6 @@
 # Dr. Superhuman General MediBot
 
-An advanced RAG-powered internal AI assistant for **MediAssist Health Network**, built as a custom take on the Codebasics MediBot assignment.
+An advanced RAG-powered internal AI assistant for **MediAssist Health Network**, built as a custom take on fun learning and sharing.
 
 ## Features
 
